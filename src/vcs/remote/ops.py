@@ -32,8 +32,6 @@ from vcs.store.exceptions import BranchNotFoundError, RemoteError
 from vcs.store.models import Commit, Tree, TreeEntry
 from vcs.store.objects import ObjectStore
 from vcs.remote.protocol import RemoteClient
-from vcs.branch.ops import merge_branch
-from vcs.store.exceptions import MergeConflictError
 
 
 def add(name: str, url: str, repo_root: Path | None = None) -> None:
