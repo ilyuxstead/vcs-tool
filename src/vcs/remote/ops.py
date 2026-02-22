@@ -59,17 +59,17 @@ def list_all(repo_root: Path | None = None) -> list[dict]:
 
 def _collect_push_objects(
     conn,
-    store: "ObjectStore",
+    store,           # ObjectStore
     tip_hash: str,
     server_needs: set[str],
     server_known: set[str],
 ) -> tuple[list[tuple[str, bytes]], list[tuple[str, bytes]], list[tuple[str, bytes]]]:
     """
-    Walk the commit DAG from *tip_hash* and collect every object that must be
-    sent to the server.
+    Walk the commit DAG from *tip_hash* and collect every object to send.
 
-    The walk stops at any commit whose hash is in *server_known* — the server
-    already has that commit and all of its ancestors (commits are append-only).
+    The walk stops at any commit whose hash is in *server_known* — the
+    server already has that commit and all of its ancestors (commits are
+    append-only, so this invariant holds).
 
     Parameters
     ----------
@@ -80,53 +80,45 @@ def _collect_push_objects(
     tip_hash:
         SHA3-256 hex hash of the local branch tip.
     server_needs:
-        Set of object hashes the server reported it does not have (from
-        negotiate_refs).  Used to decide which file blobs to include.
+        Set of object hashes the server reported it does not have.
+        Used to decide which file blobs to include.
     server_known:
         Set of commit hashes the server already has.  BFS stops here.
 
     Returns
     -------
     (commit_payloads, tree_payloads, blob_payloads)
-        Each element is a list of (hex_hash, raw_bytes) pairs in the order
-        they should be uploaded (parents before children for commits/trees).
+        Each is a list of (hex_hash, raw_bytes) in parents-before-children
+        order, ready for upload.
     """
-    from collections import deque
-    from vcs.store.db import get_commit, get_tree
-    from vcs.store.exceptions import CommitNotFoundError
+    from vcs.store.db import get_commit, get_tree          # already imported at module level
+    from vcs.store.exceptions import CommitNotFoundError   # already imported at module level
 
     visited_commits: set[str] = set()
-    # BFS queue; we collect in BFS order then reverse for topo upload order.
+    visited_trees: set[str] = set()
     queue: deque[str] = deque([tip_hash])
 
+    # Collected in BFS order; reversed before return for topo upload order.
     ordered_commits: list[tuple[str, bytes]] = []
     ordered_trees: list[tuple[str, bytes]] = []
     needed_blobs: list[tuple[str, bytes]] = []
-
-    visited_trees: set[str] = set()
 
     while queue:
         current_hash = queue.popleft()
         if current_hash in visited_commits:
             continue
         if current_hash in server_known:
-            # Server has this commit and all its ancestors — stop traversal.
-            continue
+            continue  # Server has this and all its ancestors — stop here.
         visited_commits.add(current_hash)
 
         try:
             commit = get_commit(conn, current_hash)
         except CommitNotFoundError:
-            # Dangling reference in local DB — skip gracefully.
-            continue
+            continue  # Dangling reference — skip gracefully.
 
-        # Serialise commit to the same wire format used by upload_commit().
-        commit_raw = commit.to_dict()
-        import json as _json
-        commit_bytes = _json.dumps(commit_raw).encode("utf-8")
+        commit_bytes = json.dumps(commit.to_dict()).encode("utf-8")
         ordered_commits.append((current_hash, commit_bytes))
 
-        # Collect tree (once per unique tree hash).
         if commit.tree_hash not in visited_trees:
             visited_trees.add(commit.tree_hash)
             try:
@@ -143,16 +135,12 @@ def _collect_push_objects(
                         for e in tree.entries
                     ],
                 }
-                tree_bytes = _json.dumps(tree_payload).encode("utf-8")
-                ordered_trees.append((tree.hash, tree_bytes))
+                ordered_trees.append((tree.hash, json.dumps(tree_payload).encode("utf-8")))
 
-                # Collect file blobs the server says it needs.
                 for entry in tree.entries:
                     if entry.object_hash in server_needs and store.exists(entry.object_hash):
-                        blob_data = store.read(entry.object_hash)
-                        needed_blobs.append((entry.object_hash, blob_data))
+                        needed_blobs.append((entry.object_hash, store.read(entry.object_hash)))
 
-        # Enqueue parents.
         for parent_hash in commit.parent_hashes:
             if parent_hash not in visited_commits:
                 queue.append(parent_hash)
