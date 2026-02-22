@@ -218,8 +218,8 @@ class TestPullBranchNameKwarg:
         with patch(_FETCH_PATCH, return_value=_fake_fetch_result({"feature": "b" * 64})):
             with patch(_MERGE_PATCH, return_value="c" * 64) as mock_merge:
                 pull("origin", branch_name="feature", repo_root=root, author=AUTHOR)
-        # source_name is the first positional argument to merge_branch
-        assert mock_merge.call_args.args[0] == "feature"
+        # merge_branch is called with source_name as a keyword argument
+        assert mock_merge.call_args.kwargs.get("source_name") == "feature"
 
     def test_branch_name_fallback_to_current_branch(self, tmp_path: Path):
         """When branch_name is None, current branch ('main') is the source."""
@@ -227,7 +227,7 @@ class TestPullBranchNameKwarg:
         with patch(_FETCH_PATCH, return_value=_fake_fetch_result({"main": "d" * 64})):
             with patch(_MERGE_PATCH, return_value="e" * 64) as mock_merge:
                 pull("origin", repo_root=root, author=AUTHOR)
-        assert mock_merge.call_args.args[0] == "main"
+        assert mock_merge.call_args.kwargs.get("source_name") == "main"
 
 
 # ---------------------------------------------------------------------------
