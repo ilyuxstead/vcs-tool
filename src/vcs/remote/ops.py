@@ -154,29 +154,26 @@ def _collect_push_objects(
 def push(
     remote_name: str = "origin",
     branch_name: str | None = None,
-    repo_root: "Path | None" = None,
+    repo_root: Path | None = None,
 ) -> dict:
     """
     Push local commits to the remote via the six-step HTTP handshake.
 
-    Uploads the full set of ancestor commits, trees, and file blobs that
-    the server does not already have, then advances the remote branch tip.
+    Walks the full local DAG from the branch tip back to the server's
+    known boundary, uploading every missing commit, tree, and file blob
+    in topological (parents-first) order before advancing the remote ref.
 
     Returns a summary dict:
-        branch          – branch name pushed
-        remote          – remote name
-        tip_hash        – SHA3-256 hash of the tip commit
+        branch           – branch name pushed
+        remote           – remote name
+        tip_hash         – SHA3-256 hash of the tip commit
         commits_uploaded – number of commit objects sent
         trees_uploaded   – number of tree objects sent
         blobs_uploaded   – number of file blob objects sent
     """
-    from pathlib import Path
-    from vcs.repo.init import current_branch, find_repo_root, vcs_dir
-    from vcs.store.db import get_branch, get_remote, open_db
-    from vcs.store.exceptions import BranchNotFoundError, RemoteError
-    from vcs.store.objects import ObjectStore
-    from vcs.remote.protocol import RemoteClient
-
+    # All names below (find_repo_root, vcs_dir, open_db, ObjectStore,
+    # RemoteClient, get_remote, current_branch, get_branch,
+    # BranchNotFoundError, RemoteError) are bound at MODULE LEVEL in ops.py.
     root = repo_root or find_repo_root()
     dot_vcs = vcs_dir(root)
     conn = open_db(dot_vcs / "vcs.db")
@@ -184,7 +181,7 @@ def push(
 
     try:
         remote_info = get_remote(conn, remote_name)
-        client = RemoteClient(remote_info["url"])
+        client = RemoteClient(remote_info["url"])   # ← module-level RemoteClient
 
         target_branch = branch_name or current_branch(root)
         if not target_branch:
@@ -197,66 +194,47 @@ def push(
 
         local_refs = {target_branch: branch.tip_hash}
 
-        # ------------------------------------------------------------------
         # Step 1 — Ref negotiation.
-        # negotiate_refs() returns the set of object hashes the server does
-        # NOT have.  We treat anything we sent in local_refs whose hash is
-        # NOT in "need" as implicitly known to the server.
-        # ------------------------------------------------------------------
+        # negotiate_refs() returns hashes the server does NOT have.
+        # Anything we advertised that is NOT in "need" is implicitly known.
         needed_hashes: list[str] = client.negotiate_refs(local_refs)
         server_needs: set[str] = set(needed_hashes)
-
-        # Derive "server_known" from what we advertised vs what server needs.
-        # Any commit hash we sent that the server did NOT put in "need" is
-        # already known to the server.  This seeds the BFS boundary.
         server_known: set[str] = {
             h for h in local_refs.values() if h not in server_needs
         }
 
-        # ------------------------------------------------------------------
         # Collect the full set of objects to upload via DAG walk.
-        # ------------------------------------------------------------------
         commit_payloads, tree_payloads, blob_payloads = _collect_push_objects(
             conn, store, branch.tip_hash, server_needs, server_known
         )
 
-        # ------------------------------------------------------------------
-        # Step 3 — Upload file blobs (octet-stream).
-        # ------------------------------------------------------------------
+        # Step 3 — Upload file blobs (octet-stream), deduped.
         uploaded_blob_hashes: set[str] = set()
         for hex_hash, data in blob_payloads:
             if hex_hash not in uploaded_blob_hashes:
                 client.upload_blob(hex_hash, data)
                 uploaded_blob_hashes.add(hex_hash)
 
-        # ------------------------------------------------------------------
-        # Step 4a — Upload tree objects (JSON, parents-first order).
-        # ------------------------------------------------------------------
+        # Step 4a — Upload tree objects (parents-first), deduped.
         uploaded_tree_hashes: set[str] = set()
         for hex_hash, data in tree_payloads:
             if hex_hash not in uploaded_tree_hashes:
                 client.upload_blob(hex_hash, data)   # trees travel as blobs
                 uploaded_tree_hashes.add(hex_hash)
 
-        # ------------------------------------------------------------------
-        # Step 4b — Upload commit objects (JSON, parents-first order).
-        # ------------------------------------------------------------------
+        # Step 4b — Upload commit objects (parents-first), deduped.
+        # The tip commit uses upload_commit(); ancestors use upload_blob()
+        # so the server can ingest them without a separate endpoint.
         uploaded_commit_hashes: set[str] = set()
         for hex_hash, data in commit_payloads:
             if hex_hash not in uploaded_commit_hashes:
-                # Use upload_commit for the tip; upload_blob for ancestors so
-                # the server can ingest them without a separate endpoint.
-                # The tip commit is always last (reversed BFS order).
                 if hex_hash == branch.tip_hash:
-                    import json as _json
-                    client.upload_commit(_json.loads(data.decode("utf-8")))
+                    client.upload_commit(json.loads(data.decode("utf-8")))
                 else:
                     client.upload_blob(hex_hash, data)
                 uploaded_commit_hashes.add(hex_hash)
 
-        # ------------------------------------------------------------------
-        # Step 5 — Advance the remote ref.
-        # ------------------------------------------------------------------
+        # Step 5 — Advance the remote ref (must be last).
         client.update_ref(target_branch, branch.tip_hash)
 
         return {
