@@ -70,6 +70,14 @@ def _dispatch(
         dot_vcs = init_repo(path, bare=sub_ns.bare)
         success(f"Initialised empty VCS repository in {dot_vcs}", json_mode=json_mode)
 
+    elif command == "repo.clone":
+        from vcs.repo.clone import clone_repo
+        url: str = sub_ns.url
+        dest = Path(sub_ns.dir).resolve() if sub_ns.dir else None
+        depth: int | None = sub_ns.depth
+        cloned_root = clone_repo(url, dest, depth=depth)
+        success(f"Cloned {url!r} into {cloned_root}", json_mode=json_mode)
+
     elif command == "repo.status":
         from vcs.repo.init import find_repo_root
         from vcs.repo.status import compute_status

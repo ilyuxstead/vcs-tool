@@ -26,7 +26,7 @@ from .status import (
     read_index,
     write_index,
 )
-
+from .clone import clone_repo
 __all__ = [
     "DEFAULT_BRANCH",
     "VCS_DIR",
@@ -48,4 +48,5 @@ __all__ = [
     "compute_status",
     "read_index",
     "write_index",
+    "clone_repo",
 ]

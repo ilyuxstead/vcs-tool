@@ -88,6 +88,11 @@ class RemoteError(VCSError):
     error_code = "REMOTE_ERROR"
 
 
+class CloneError(VCSError):
+    """Raised when a ``repo.clone`` operation fails."""
+    error_code = "CLONE_ERROR"
+
+    
 class AuthenticationError(RemoteError):
     """Raised when VCS_AUTH_TOKEN is missing or rejected."""
 
