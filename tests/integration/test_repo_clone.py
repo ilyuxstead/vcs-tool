@@ -17,7 +17,7 @@ are already defined at the top of that file.
 import json as _json
 from pathlib import Path
 from unittest.mock import MagicMock, patch
-
+from tests.integration.conftest import run, run_json, make_repo
 # Paste the constants + helper below *inside* the test file, or keep them
 # local to the class using class-level attributes.
 

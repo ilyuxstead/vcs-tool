@@ -19,58 +19,7 @@ import pytest
 
 from vcs.__main__ import main
 
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-def run(args: list[str], repo_root: Path | None = None) -> tuple[int, str, str]:
-    """
-    Run main() with *args*, capture stdout/stderr, return (exit_code, out, err).
-    Injects --repo if repo_root is provided.
-    """
-    if repo_root:
-        args = ["--repo", str(repo_root)] + args
-
-    out_buf = io.StringIO()
-    err_buf = io.StringIO()
-    exit_code = 0
-    with redirect_stdout(out_buf), redirect_stderr(err_buf):
-        try:
-            main(args)
-        except SystemExit as e:
-            exit_code = e.code if isinstance(e.code, int) else 1
-    return exit_code, out_buf.getvalue(), err_buf.getvalue()
-
-
-def run_json(args: list[str], repo_root: Path | None = None) -> tuple[int, dict, str]:
-    """Like run() but prepends --json and parses stdout or stderr as JSON.
-
-    Success responses emit JSON on stdout; error responses emit JSON on stderr.
-    Try stdout first, fall back to stderr so both exit paths are covered.
-    """
-    code, out, err = run(["--json"] + args, repo_root)
-    if out.strip():
-        data = json.loads(out)
-    elif err.strip():
-        data = json.loads(err)
-    else:
-        data = {}
-    return code, data, err
-
-
-def make_repo(tmp_path: Path, author: str = "CLI Tester <cli@test.local>") -> Path:
-    """Initialise a repo, make one commit, return the root."""
-    root = tmp_path / "repo"
-    root.mkdir()
-    code, _, _ = run(["repo.init", str(root)])
-    assert code == 0
-    (root / "hello.py").write_text("print('hello')\n")
-    run(["commit.stage", "hello.py"], root)
-    run(["commit.snapshot", "-m", "Initial commit", "--author", author], root)
-    return root
-
-
+from tests.integration.conftest import run, run_json, make_repo
 # ---------------------------------------------------------------------------
 # repo.*
 # ---------------------------------------------------------------------------
