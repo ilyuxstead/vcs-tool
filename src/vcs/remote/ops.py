@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from collections import deque
 
 from vcs.repo.init import current_branch, find_repo_root, resolve_head_commit, vcs_dir
 from vcs.store.db import (
