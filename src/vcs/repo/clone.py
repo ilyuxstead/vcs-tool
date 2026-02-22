@@ -185,6 +185,37 @@ def clone_repo(
         raise CloneError(f"Clone failed with unexpected error: {exc}") from exc
     finally:
         conn.close()
+    
+    # -----------------------------------------------------------------------
+    # Checkout working tree from HEAD commit
+    # -----------------------------------------------------------------------
+    from vcs.store.db import get_commit, get_tree, open_db
+    from vcs.store.objects import ObjectStore
+    from vcs.repo.status import write_index
+
+    dot_vcs_dest = dest / ".vcs"
+    conn = open_db(dot_vcs_dest / "vcs.db")
+    store = ObjectStore(dot_vcs_dest / "objects")
+
+    try:
+        head_hash = resolve_head_commit(dest)
+        
+        if head_hash is not None:
+            commit = get_commit(conn, head_hash)
+            tree = get_tree(conn, commit.tree_hash)
+        
+        new_index: dict[str, str] = {}
+        
+        for entry in tree.entries:
+            out_path = dest / entry.name
+            out_path.parent.mkdir(parents=True, exist_ok=True)
+            out_path.write_bytes(store.read(entry.object_hash))
+            new_index[entry.name] = entry.object_hash
+
+        write_index(dest, new_index)
+    
+    finally:
+        conn.close()
 
     return dest
 
