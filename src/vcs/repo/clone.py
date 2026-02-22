@@ -27,7 +27,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Iterable
+from urllib.parse import urlparse
 
 from vcs.repo.init import DEFAULT_BRANCH, init_repo, vcs_dir, write_head
 from vcs.store.db import (
@@ -36,7 +36,6 @@ from vcs.store.db import (
     insert_commit,
     insert_tree,
     open_db,
-    update_branch_tip,
 )
 from vcs.store.exceptions import CloneError, RemoteError
 from vcs.store.models import Commit, Tree, TreeEntry
@@ -175,7 +174,7 @@ def clone_repo(
         # 7. Reconstruct working tree for HEAD branch                          #
         # ------------------------------------------------------------------ #
         head_tip = remote_refs[default_branch]
-        _reconstruct_working_tree(dest, dot_vcs, store, conn, head_tip)
+        _reconstruct_working_tree(dest, store, conn, head_tip)
 
         # Point HEAD at the default branch
         write_head(dest, f"ref: refs/branches/{default_branch}")
@@ -195,11 +194,16 @@ def clone_repo(
 # ---------------------------------------------------------------------------
 
 def _resolve_dest(url: str, dest: Path | None) -> Path:
-    """Derive the local destination path from the URL when not specified."""
+    """
+    Derive the local destination path from the URL when *dest* is not given.
+
+    Uses urlparse so that a bare host URL like https://example.com/ correctly
+    falls back to cloned_repo rather than using the hostname as directory name.
+    """
     if dest is not None:
         return dest.resolve()
-    # Strip trailing slashes, take last component, drop .vcs suffix
-    slug = url.rstrip("/").rsplit("/", 1)[-1]
+    path_part = urlparse(url).path.strip("/")
+    slug = path_part.rsplit("/", 1)[-1] if path_part else ""
     if slug.endswith(".vcs"):
         slug = slug[:-4]
     if not slug:
@@ -304,7 +308,6 @@ def _tree_from_blob(raw: bytes, expected_hash: str) -> Tree:
 
 def _reconstruct_working_tree(
     repo_root: Path,
-    dot_vcs: Path,
     store: ObjectStore,
     conn,
     tip_hash: str,
