@@ -1,0 +1,4 @@
+# file: /Users/Gregory/6 Media & Creative/20-29 Creative Projects/25 Work in progress/25.01 vcs/vcs-tool/src/vcs/__main__.py
+# hypothesis_version: 6.151.9
+
+['\nInterrupted.', '%Y-%m-%dT%H:%M:%SZ', '* ', '__main__', 'active', 'added', 'annotate', 'branch.create', 'branch.delete', 'branch.list', 'branch.merge', 'branch.switch', 'branches', 'clean', 'commit', 'commit.show', 'commit.snapshot', 'commit.stage', 'commit.unstage', 'config.toml', 'core.author', 'data', 'deleted', 'diff', 'error_code', 'false', 'files', 'history.annotate', 'history.diff', 'history.log', 'lines', 'message', 'modified', 'name', 'remote.add', 'remote.fetch', 'remote.list', 'remote.pull', 'remote.push', 'remotes', 'repo.config', 'repo.init', 'repo.status', 'staged_deleted', 'staged_modified', 'staged_new', 'status', 'success', 'tag.create', 'tag.list', 'tags', 'target_hash', 'timestamp', 'tip_hash', 'true', 'untracked', 'vcs.db']

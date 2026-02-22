@@ -1,0 +1,28 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "vcs-tool"
+version = "0.1.0"
+description = "A modern version control system synthesizing the best of Git, Fossil, Mercurial, and SVN."
+requires-python = ">=3.11"
+dependencies = []  # stdlib only for core
+
+[project.scripts]
+vcs = "vcs.__main__:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/vcs"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "--tb=short --strict-markers -v"
+
+[tool.coverage.run]
+source = ["src/vcs"]
+branch = true
+
+[tool.coverage.report]
+fail_under = 90
+show_missing = true

@@ -1,0 +1,4 @@
+# file: /Users/Gregory/6 Media & Creative/20-29 Creative Projects/25 Work in progress/25.01 vcs/vcs-tool/src/vcs/remote/protocol.py
+# hypothesis_version: 6.151.9
+
+['/', '<REDACTED>', 'Accept', 'Authorization', 'Content-Type', 'GET', 'POST', 'PUT', 'User-Agent', 'VCS_AUTH_TOKEN', 'application/json', 'branch', 'hash', 'need', 'ok', 'refs', 'replace', 'vcs-tool/0.1.0']
