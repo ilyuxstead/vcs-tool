@@ -5,27 +5,26 @@ Unit tests for the corrected remote.push() DAG walk.
 
 Covers:
   * Single commit (root) -- still works (regression guard).
-  * Two-commit linear chain -- ancestor is uploaded, not just tip.
-  * Server already has the root -- only the new commit is uploaded.
+  * Two-commit linear chain -- both commits uploaded to empty remote.
+  * Incremental push -- server has ancestor, only new commit uploaded.
   * Detached HEAD raises RemoteError.
   * Missing remote raises RemoteError.
   * Blobs already known to server are not re-uploaded.
   * Return dict contains correct counts.
   * update_ref is the final remote call.
 
-Patch target
-------------
-RemoteClient is imported at MODULE LEVEL in vcs/remote/ops.py:
-
-    from vcs.remote.protocol import RemoteClient
-
-So the correct patch target is "vcs.remote.ops.RemoteClient" -- exactly
-the same as the existing passing tests in tests/unit/test_remote.py.
+How the DAG boundary works
+--------------------------
+push() calls fetch_refs() first to learn what commit hash the server
+already has for the branch.  That hash seeds server_known_commits, which
+is the BFS stop condition.  Tests set mock.fetch_refs.return_value
+accordingly:
+  - empty remote  → {}              (full history walk)
+  - incremental   → {"main": <old_hash>}  (stop at old commit)
 """
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -50,8 +49,7 @@ def _make_repo_with_chain(tmp_path: Path, num_commits: int = 1) -> tuple[Path, l
 
     Uses init_repo -> stage_files -> create_snapshot so that the branch
     pointer, tree rows, and object-store blobs are all produced through
-    the same code paths as production.  Mirrors the pattern used in
-    tests/unit/test_remote.py::_make_repo_with_commit.
+    the same code paths as production.
 
     Returns (repo_root, [oldest_commit_hash, ..., tip_commit_hash]).
     """
@@ -70,9 +68,25 @@ def _make_repo_with_chain(tmp_path: Path, num_commits: int = 1) -> tuple[Path, l
     return root, commit_hashes
 
 
-def _mock_client(needed: list[str] | None = None) -> MagicMock:
+def _mock_client(
+    needed: list[str] | None = None,
+    remote_refs: dict[str, str] | None = None,
+) -> MagicMock:
+    """
+    Build a RemoteClient mock.
+
+    Parameters
+    ----------
+    needed:
+        Hashes negotiate_refs reports the server needs.
+        Defaults to [] (server needs nothing beyond what we send).
+    remote_refs:
+        What fetch_refs reports the server already has.
+        Defaults to {} (empty remote — no known commits).
+    """
     m = MagicMock(spec=RemoteClient)
     m.negotiate_refs.return_value = needed if needed is not None else []
+    m.fetch_refs.return_value = remote_refs if remote_refs is not None else {}
     m.upload_blob.return_value = None
     m.upload_commit.return_value = None
     m.update_ref.return_value = None
@@ -84,24 +98,16 @@ def _mock_client(needed: list[str] | None = None) -> MagicMock:
 # ---------------------------------------------------------------------------
 
 class TestPushDagWalk:
-    """
-    RemoteClient is patched at "vcs.remote.ops.RemoteClient" because that
-    is the module-level binding used by push() -- identical to the existing
-    passing tests in tests/unit/test_remote.py::TestRemotePush.
-
-    VCS_AUTH_TOKEN is not required here because the real RemoteClient
-    constructor is never called -- the class itself is replaced by the patch
-    before push() reaches the instantiation line.
-    """
 
     def test_single_root_commit_uploads_commit_and_tree(self, tmp_path: Path):
-        """A single-commit repo: at least one commit and one tree must be uploaded."""
+        """Single-commit repo to empty remote: commit and tree must be uploaded."""
         root, hashes = _make_repo_with_chain(tmp_path, num_commits=1)
         add("origin", "https://example.com", root)
         tip = hashes[0]
 
         store = ObjectStore(vcs_dir(root) / "objects")
-        mock = _mock_client(needed=store.all_hashes())
+        # Empty remote: fetch_refs={}, server needs all objects.
+        mock = _mock_client(needed=store.all_hashes(), remote_refs={})
 
         with patch("vcs.remote.ops.RemoteClient", return_value=mock):
             result = push("origin", repo_root=root)
@@ -112,12 +118,12 @@ class TestPushDagWalk:
         mock.update_ref.assert_called_once_with("main", tip)
 
     def test_two_commit_chain_uploads_both_commits(self, tmp_path: Path):
-        """A two-commit chain to an empty remote: both commits must be uploaded."""
+        """Two-commit chain to empty remote: both commits must be uploaded."""
         root, hashes = _make_repo_with_chain(tmp_path, num_commits=2)
         add("origin", "https://example.com", root)
 
         store = ObjectStore(vcs_dir(root) / "objects")
-        mock = _mock_client(needed=store.all_hashes())
+        mock = _mock_client(needed=store.all_hashes(), remote_refs={})
 
         with patch("vcs.remote.ops.RemoteClient", return_value=mock):
             result = push("origin", repo_root=root)
@@ -129,8 +135,8 @@ class TestPushDagWalk:
 
     def test_incremental_push_skips_known_ancestor(self, tmp_path: Path):
         """
-        Server already has the first commit.
-        Only the tip (second) commit should be uploaded.
+        Server already has the first commit (fetch_refs returns it).
+        Only the second (new) commit should be uploaded.
         """
         root, hashes = _make_repo_with_chain(tmp_path, num_commits=2)
         add("origin", "https://example.com", root)
@@ -138,9 +144,11 @@ class TestPushDagWalk:
         old_commit_hash = hashes[0]
         new_commit_hash = hashes[1]
 
-        # Server only needs the new tip; ancestor is implicitly known
-        # (not in the "need" list, so treated as server_known).
-        mock = _mock_client(needed=[new_commit_hash])
+        # Server knows the old commit — BFS stops there.
+        mock = _mock_client(
+            needed=[new_commit_hash],
+            remote_refs={"main": old_commit_hash},
+        )
 
         with patch("vcs.remote.ops.RemoteClient", return_value=mock):
             result = push("origin", repo_root=root)
@@ -159,8 +167,8 @@ class TestPushDagWalk:
         add("origin", "https://example.com", root)
         tip = hashes[0]
 
-        # Server only needs the commit object itself, not the file blobs.
-        mock = _mock_client(needed=[tip])
+        # Server needs only the commit object, not the file blobs.
+        mock = _mock_client(needed=[tip], remote_refs={})
 
         with patch("vcs.remote.ops.RemoteClient", return_value=mock):
             result = push("origin", repo_root=root)
@@ -182,15 +190,15 @@ class TestPushDagWalk:
     def test_missing_remote_raises(self, tmp_path: Path):
         """Pushing to an unregistered remote must raise RemoteError."""
         root, _ = _make_repo_with_chain(tmp_path, num_commits=1)
-        # No patch needed -- push() raises before constructing RemoteClient.
+        # push() raises before constructing RemoteClient — no patch needed.
         with pytest.raises(RemoteError):
             push("nonexistent", repo_root=root)
 
     def test_return_dict_has_expected_keys(self, tmp_path: Path):
-        """Return dict must contain branch, remote, tip_hash, and all upload counts."""
+        """Return dict must contain branch, remote, tip_hash, and upload counts."""
         root, _ = _make_repo_with_chain(tmp_path, num_commits=1)
         add("origin", "https://example.com", root)
-        mock = _mock_client(needed=[])
+        mock = _mock_client(needed=[], remote_refs={})
 
         with patch("vcs.remote.ops.RemoteClient", return_value=mock):
             result = push("origin", repo_root=root)
@@ -207,6 +215,7 @@ class TestPushDagWalk:
         call_order: list[str] = []
 
         mock = MagicMock(spec=RemoteClient)
+        mock.fetch_refs.return_value = {}
         mock.negotiate_refs.return_value = []
         mock.upload_blob.side_effect = lambda *a, **kw: call_order.append("upload_blob")
         mock.upload_commit.side_effect = lambda *a, **kw: call_order.append("upload_commit")
