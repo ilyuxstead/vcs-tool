@@ -126,6 +126,13 @@ def clone_repo(
         blobs_downloaded = 0
         commits_downloaded = 0
 
+        # Maps tree-entry logical hash → real SHA3-256 content hash returned
+        # by store.write().  The remote may key blobs by a logical ID that
+        # differs from the SHA3-256 of the actual bytes (common in test mocks
+        # and some server implementations).  We need the real store key to
+        # retrieve blobs during working-tree checkout.
+        blob_key_map: dict[str, str] = {}
+
         for branch_name, tip_hash in remote_refs.items():
             commit_chain = _fetch_commit_chain(client, tip_hash, depth=depth)
 
@@ -151,8 +158,8 @@ def clone_repo(
                 insert_tree(conn, tree)
 
                 for entry in tree.entries:
-                    if store.exists(entry.object_hash):
-                        continue
+                    if entry.object_hash in blob_key_map:
+                        continue  # already downloaded this blob
                     try:
                         blob = client.download_blob(entry.object_hash)
                     except RemoteError as exc:
@@ -160,11 +167,13 @@ def clone_repo(
                             f"Failed to download blob {entry.object_hash[:12]} "
                             f"({entry.name}): {exc}"
                         ) from exc
-                    store.write(blob)
+                    real_hash = store.write(blob)
+                    # Record: logical key (from tree) → real content-addressed key
+                    blob_key_map[entry.object_hash] = real_hash
                     blobs_downloaded += 1
 
         # ------------------------------------------------------------------ #
-        # 6. Write branch pointers                                             #
+        # 6. Write branch pointers and point HEAD at the default branch        #
         # ------------------------------------------------------------------ #
         default_branch: str = (
             DEFAULT_BRANCH if DEFAULT_BRANCH in remote_refs else next(iter(remote_refs))
@@ -173,15 +182,15 @@ def clone_repo(
         for branch_name, tip_hash in remote_refs.items():
             create_branch(conn, branch_name, tip_hash)
 
-        # Point HEAD at the default branch BEFORE checkout so
-        # resolve_head_commit() can find it if needed by status later.
+        # HEAD must be written before status can resolve the repo — do it
+        # here so _reconstruct_working_tree's index matches what status sees.
         write_head(dest, f"ref: refs/branches/{default_branch}")
 
         # ------------------------------------------------------------------ #
         # 7. Reconstruct working tree for HEAD branch                          #
         # ------------------------------------------------------------------ #
         head_tip = remote_refs[default_branch]
-        _reconstruct_working_tree(dest, store, conn, head_tip)
+        _reconstruct_working_tree(dest, store, conn, head_tip, blob_key_map)
 
     except CloneError:
         raise
@@ -315,13 +324,19 @@ def _reconstruct_working_tree(
     store: ObjectStore,
     conn,
     tip_hash: str,
+    blob_key_map: dict[str, str],
 ) -> None:
     """
     Write all files from the HEAD commit's tree into the working directory
     and sync the staging index so ``repo.status`` reports clean immediately.
 
-    Skips blobs absent from the local store (defensive; shouldn't happen
-    after a successful fetch).
+    Parameters
+    ----------
+    blob_key_map:
+        Maps each tree-entry logical hash → the real SHA3-256 key under
+        which the blob was stored by ``store.write()``.  When the remote
+        uses content-addressed blobs the two are identical; when it uses
+        logical IDs (or in test mocks with synthetic hashes) they differ.
     """
     commit = get_commit(conn, tip_hash)
     tree = get_tree(conn, commit.tree_hash)
@@ -332,10 +347,11 @@ def _reconstruct_working_tree(
         dest_path = repo_root / entry.name
         dest_path.parent.mkdir(parents=True, exist_ok=True)
 
-        if not store.exists(entry.object_hash):
-            continue  # defensive skip; log-worthy in production
-
-        dest_path.write_bytes(store.read(entry.object_hash))
+        # Resolve the real store key: prefer the content-addressed key
+        # recorded during download; fall back to the tree-entry hash itself
+        # for servers that already use SHA3-256 as blob IDs.
+        real_key = blob_key_map.get(entry.object_hash, entry.object_hash)
+        dest_path.write_bytes(store.read(real_key))
         index[entry.name] = entry.object_hash
 
     write_index(repo_root, index)
