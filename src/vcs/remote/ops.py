@@ -162,9 +162,9 @@ def push(
     """
     Push local commits to the remote via the six-step HTTP handshake.
 
-    Walks the full local DAG from the branch tip back to the server's
-    known boundary, uploading every missing commit, tree, and file blob
-    in topological (parents-first) order before advancing the remote ref.
+    Walks the local DAG from the branch tip back to the server's current
+    branch tip (obtained via fetch_refs), uploading every missing commit,
+    tree, and file blob in topological order before advancing the remote ref.
 
     Returns a summary dict:
         branch           – branch name pushed
@@ -174,9 +174,6 @@ def push(
         trees_uploaded   – number of tree objects sent
         blobs_uploaded   – number of file blob objects sent
     """
-    # All names below (find_repo_root, vcs_dir, open_db, ObjectStore,
-    # RemoteClient, get_remote, current_branch, get_branch,
-    # BranchNotFoundError, RemoteError) are bound at MODULE LEVEL in ops.py.
     root = repo_root or find_repo_root()
     dot_vcs = vcs_dir(root)
     conn = open_db(dot_vcs / "vcs.db")
@@ -184,7 +181,7 @@ def push(
 
     try:
         remote_info = get_remote(conn, remote_name)
-        client = RemoteClient(remote_info["url"])   # ← module-level RemoteClient
+        client = RemoteClient(remote_info["url"])
 
         target_branch = branch_name or current_branch(root)
         if not target_branch:
@@ -195,20 +192,28 @@ def push(
         except BranchNotFoundError:
             raise RemoteError(f"Branch {target_branch!r} does not exist locally.")
 
-        local_refs = {target_branch: branch.tip_hash}
+        # ------------------------------------------------------------------
+        # Step 1a — Ask the server what it already has (fetch_refs).
+        # This gives us the true DAG boundary for the walk.
+        # If the server has no branch yet, server_known_commits is empty
+        # and we walk the full history.
+        # ------------------------------------------------------------------
+        remote_refs: dict[str, str] = client.fetch_refs()
+        server_known_commits: set[str] = set(remote_refs.values())
 
-        # Step 1 — Ref negotiation.
-        # negotiate_refs() returns hashes the server does NOT have.
-        # Anything we advertised that is NOT in "need" is implicitly known.
+        # ------------------------------------------------------------------
+        # Step 1b — Ref negotiation: tell the server our tip, get back the
+        # set of object hashes (blobs, trees) it does not have.
+        # ------------------------------------------------------------------
+        local_refs = {target_branch: branch.tip_hash}
         needed_hashes: list[str] = client.negotiate_refs(local_refs)
         server_needs: set[str] = set(needed_hashes)
-        server_known: set[str] = {
-            h for h in local_refs.values() if h not in server_needs
-        }
 
+        # ------------------------------------------------------------------
         # Collect the full set of objects to upload via DAG walk.
+        # ------------------------------------------------------------------
         commit_payloads, tree_payloads, blob_payloads = _collect_push_objects(
-            conn, store, branch.tip_hash, server_needs, server_known
+            conn, store, branch.tip_hash, server_needs, server_known_commits
         )
 
         # Step 3 — Upload file blobs (octet-stream), deduped.
@@ -226,8 +231,7 @@ def push(
                 uploaded_tree_hashes.add(hex_hash)
 
         # Step 4b — Upload commit objects (parents-first), deduped.
-        # The tip commit uses upload_commit(); ancestors use upload_blob()
-        # so the server can ingest them without a separate endpoint.
+        # Tip uses upload_commit(); ancestors use upload_blob().
         uploaded_commit_hashes: set[str] = set()
         for hex_hash, data in commit_payloads:
             if hex_hash not in uploaded_commit_hashes:
