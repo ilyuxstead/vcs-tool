@@ -138,7 +138,14 @@ def _parse_commit_blob(raw: bytes, hex_hash: str) -> Commit:
 
     try:
         return Commit(
-            hash=data["hash"],
+            # Use hex_hash (the key under which this blob was requested) as
+            # the authoritative hash.  The embedded "hash" field, when present,
+            # is informational only — trusting it would cause a mismatch when
+            # the blob was looked up by a different hash than the one embedded
+            # inside (which happens during fetch when fetch_refs returns the
+            # real address and the blob re-serialises itself with a different
+            # digest).
+            hash=hex_hash,
             tree_hash=data["tree_hash"],
             parent_hashes=tuple(data.get("parent_hashes", [])),
             author=data.get("author", ""),

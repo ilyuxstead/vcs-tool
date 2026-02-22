@@ -75,7 +75,14 @@ def _make_commit_blob(
     message: str = "test commit",
     timestamp: str = "2026-01-01T00:00:00Z",
 ) -> tuple[str, bytes]:
-    """Return (hash, raw) for a commit blob."""
+    """
+    Return (hash, raw) for a commit blob.
+
+    Raw bytes are canonical JSON WITHOUT an embedded hash field, matching
+    Commit.canonical_bytes().  _parse_commit_blob uses the lookup key
+    (hex_hash) as the authoritative hash, so sha3(raw) is the value that
+    ends up in SQLite — the same key used in blob_map and fetch_refs.
+    """
     raw = json.dumps(
         {
             "type": "commit",
@@ -87,12 +94,7 @@ def _make_commit_blob(
         },
         sort_keys=True,
     ).encode()
-    h = _sha3(raw)
-    # Embed the hash inside the blob so _parse_commit_blob can read it back.
-    payload = json.loads(raw)
-    payload["hash"] = h
-    final_raw = json.dumps(payload, sort_keys=True).encode()
-    return _sha3(final_raw), final_raw
+    return _sha3(raw), raw
 
 
 def _make_repo(tmp_path: Path) -> Path:
