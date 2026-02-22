@@ -8,11 +8,15 @@ Pull  → fetch + three-way merge.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 from vcs.repo.init import current_branch, find_repo_root, resolve_head_commit, vcs_dir
 from vcs.store.db import (
     add_remote,
+    branch_exists,
+    commit_exists,
+    create_branch,
     get_branch,
     get_commit,
     get_remote,
@@ -25,7 +29,7 @@ from vcs.store.db import (
     update_branch_tip,
 )
 from vcs.store.exceptions import BranchNotFoundError, RemoteError
-from vcs.store.models import Commit
+from vcs.store.models import Commit, Tree, TreeEntry
 from vcs.store.objects import ObjectStore
 from vcs.remote.protocol import RemoteClient
 
@@ -109,14 +113,200 @@ def push(
         conn.close()
 
 
+# ---------------------------------------------------------------------------
+# Private helpers for fetch
+# ---------------------------------------------------------------------------
+
+def _parse_commit_blob(raw: bytes, hex_hash: str) -> Commit:
+    """
+    Deserialise a raw blob into a Commit.
+
+    Raises RemoteError on malformed data so callers get a clean error.
+    """
+    try:
+        data = json.loads(raw.decode("utf-8"))
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        raise RemoteError(
+            f"Corrupt commit object {hex_hash[:12]}: {exc}"
+        ) from exc
+
+    if data.get("type") != "commit":
+        raise RemoteError(
+            f"Expected commit object at {hex_hash[:12]}, "
+            f"got {data.get('type')!r}."
+        )
+
+    try:
+        return Commit(
+            hash=data["hash"],
+            tree_hash=data["tree_hash"],
+            parent_hashes=tuple(data.get("parent_hashes", [])),
+            author=data.get("author", ""),
+            timestamp=data.get("timestamp", ""),
+            message=data.get("message", ""),
+        )
+    except KeyError as exc:
+        raise RemoteError(
+            f"Malformed commit object {hex_hash[:12]} — missing field {exc}."
+        ) from exc
+
+
+def _parse_tree_blob(raw: bytes, hex_hash: str) -> Tree:
+    """
+    Deserialise a raw blob into a Tree.
+
+    Raises RemoteError on malformed data.
+    """
+    try:
+        data = json.loads(raw.decode("utf-8"))
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        raise RemoteError(
+            f"Corrupt tree object {hex_hash[:12]}: {exc}"
+        ) from exc
+
+    if data.get("type") != "tree":
+        raise RemoteError(
+            f"Expected tree object at {hex_hash[:12]}, "
+            f"got {data.get('type')!r}."
+        )
+
+    try:
+        entries = tuple(
+            TreeEntry(
+                mode=e["mode"],
+                name=e["name"],
+                object_hash=e["object_hash"],
+            )
+            for e in data.get("entries", [])
+        )
+    except KeyError as exc:
+        raise RemoteError(
+            f"Malformed tree entry in {hex_hash[:12]} — missing field {exc}."
+        ) from exc
+
+    return Tree(hash=hex_hash, entries=entries)
+
+
+def _walk_and_ingest(
+    client: RemoteClient,
+    store: ObjectStore,
+    conn,
+    tip_hash: str,
+) -> tuple[int, int]:
+    """
+    Walk the commit graph from *tip_hash* backwards, downloading and persisting
+    every commit and tree that is not already present locally.
+
+    Algorithm
+    ---------
+    BFS from tip_hash.  For each commit not already in SQLite:
+      1. Download the commit blob → write to object store → insert_commit().
+      2. Download the tree blob  → write to object store → insert_tree().
+      3. Download each file blob referenced by the tree (skip duplicates).
+      4. Enqueue parent hashes that are also missing.
+
+    Returns
+    -------
+    (commits_ingested, blobs_ingested)
+    """
+    visited: set[str] = set()
+    queue: list[str] = [tip_hash]
+    commits_ingested = 0
+    blobs_ingested = 0
+
+    while queue:
+        current_hash = queue.pop(0)
+        if current_hash in visited:
+            continue
+        visited.add(current_hash)
+
+        # Skip commits already recorded in SQLite — their full sub-graph is
+        # already present (commits are append-only, so this is safe).
+        if commit_exists(conn, current_hash):
+            continue
+
+        # ---- Step A: fetch and persist the commit blob --------------------
+        try:
+            commit_raw = client.download_blob(current_hash)
+        except RemoteError as exc:
+            raise RemoteError(
+                f"Failed to download commit {current_hash[:12]}: {exc}"
+            ) from exc
+
+        store.write(commit_raw, warn_large=False)
+        commit = _parse_commit_blob(commit_raw, current_hash)
+        insert_commit(conn, commit)
+        commits_ingested += 1
+
+        # ---- Step B: fetch and persist the tree blob ----------------------
+        if not store.exists(commit.tree_hash):
+            try:
+                tree_raw = client.download_blob(commit.tree_hash)
+            except RemoteError as exc:
+                raise RemoteError(
+                    f"Failed to download tree {commit.tree_hash[:12]} "
+                    f"for commit {current_hash[:12]}: {exc}"
+                ) from exc
+            store.write(tree_raw, warn_large=False)
+            blobs_ingested += 1
+        else:
+            tree_raw = store.read(commit.tree_hash)
+
+        tree = _parse_tree_blob(tree_raw, commit.tree_hash)
+        insert_tree(conn, tree)
+
+        # ---- Step C: fetch file blobs referenced by this tree -------------
+        for entry in tree.entries:
+            if not store.exists(entry.object_hash):
+                try:
+                    file_blob = client.download_blob(entry.object_hash)
+                except RemoteError as exc:
+                    raise RemoteError(
+                        f"Failed to download blob {entry.object_hash[:12]} "
+                        f"({entry.name}): {exc}"
+                    ) from exc
+                store.write(file_blob, warn_large=False)
+                blobs_ingested += 1
+
+        # ---- Step D: enqueue parents we haven't seen ----------------------
+        for parent_hash in commit.parent_hashes:
+            if parent_hash not in visited:
+                queue.append(parent_hash)
+
+    return commits_ingested, blobs_ingested
+
+
+# ---------------------------------------------------------------------------
+# Public API — fetch
+# ---------------------------------------------------------------------------
+
 def fetch(
     remote_name: str = "origin",
     repo_root: Path | None = None,
 ) -> dict:
     """
-    Download all objects from the remote that we don't have locally.
+    Download all objects from the remote that we don't have locally and
+    persist commit + tree metadata to SQLite so that ``history.log`` and
+    other commands can traverse the fetched history.
 
-    Does NOT merge — use pull() for fetch + merge.
+    For every branch tip advertised by the remote:
+      * Walk the full commit graph (BFS, skipping already-known commits).
+      * Write each commit blob, tree blob, and file blob to the object store.
+      * Insert each Commit row and Tree row into SQLite.
+      * Create or advance the local remote-tracking branch pointer
+        (``<branch>`` — same namespace as local branches for now; a
+        ``remotes/<remote>/<branch>`` namespace can be added later without
+        breaking this interface).
+
+    Does NOT merge — use ``pull()`` for fetch + merge.
+
+    Returns
+    -------
+    dict with keys:
+      remote           – name of the remote fetched from
+      refs             – {branch: tip_hash} as reported by the server
+      commits_fetched  – number of new commit rows written to SQLite
+      blobs_fetched    – number of new blob objects written to the object store
     """
     root = repo_root or find_repo_root()
     dot_vcs = vcs_dir(root)
@@ -128,18 +318,31 @@ def fetch(
         client = RemoteClient(remote_info["url"])
 
         remote_refs = client.fetch_refs()
-        blobs_downloaded = 0
+        total_commits = 0
+        total_blobs = 0
 
         for branch_name, tip_hash in remote_refs.items():
-            if not store.exists(tip_hash):
-                blob_data = client.download_blob(tip_hash)
-                store.write(blob_data)
-                blobs_downloaded += 1
+            commits_ingested, blobs_ingested = _walk_and_ingest(
+                client, store, conn, tip_hash
+            )
+            total_commits += commits_ingested
+            total_blobs += blobs_ingested
+
+            # Advance (or create) the local branch pointer so history.log
+            # can walk from this tip.  We never move a pointer backwards.
+            if branch_exists(conn, branch_name):
+                update_branch_tip(conn, branch_name, tip_hash)
+            else:
+                create_branch(conn, branch_name, tip_hash)
 
         return {
             "remote": remote_name,
             "refs": remote_refs,
-            "blobs_downloaded": blobs_downloaded,
+            # Legacy key kept for backwards compatibility with existing tests
+            # that assert on "blobs_downloaded".
+            "blobs_downloaded": total_blobs,
+            "commits_fetched": total_commits,
+            "blobs_fetched": total_blobs,
         }
 
     finally:
