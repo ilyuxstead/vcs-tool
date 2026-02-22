@@ -12,6 +12,15 @@ Covers:
   * Blobs already known to server are not re-uploaded.
   * Return dict contains correct counts.
   * update_ref is the final remote call.
+
+Patch target
+------------
+RemoteClient is imported at MODULE LEVEL in vcs/remote/ops.py:
+
+    from vcs.remote.protocol import RemoteClient
+
+So the correct patch target is "vcs.remote.ops.RemoteClient" -- exactly
+the same as the existing passing tests in tests/unit/test_remote.py.
 """
 
 from __future__ import annotations
@@ -76,17 +85,14 @@ def _mock_client(needed: list[str] | None = None) -> MagicMock:
 
 class TestPushDagWalk:
     """
-    All tests in this class patch VCS_AUTH_TOKEN so that RemoteClient
-    construction does not raise AuthenticationError before our mocked
-    network calls are reached.  The token value is arbitrary -- the
-    RemoteClient is always replaced by a MagicMock before any real HTTP
-    request would be attempted.
-    """
+    RemoteClient is patched at "vcs.remote.ops.RemoteClient" because that
+    is the module-level binding used by push() -- identical to the existing
+    passing tests in tests/unit/test_remote.py::TestRemotePush.
 
-    @pytest.fixture(autouse=True)
-    def _set_auth_token(self):
-        with patch.dict(os.environ, {"VCS_AUTH_TOKEN": "test-token"}):
-            yield
+    VCS_AUTH_TOKEN is not required here because the real RemoteClient
+    constructor is never called -- the class itself is replaced by the patch
+    before push() reaches the instantiation line.
+    """
 
     def test_single_root_commit_uploads_commit_and_tree(self, tmp_path: Path):
         """A single-commit repo: at least one commit and one tree must be uploaded."""
@@ -132,7 +138,8 @@ class TestPushDagWalk:
         old_commit_hash = hashes[0]
         new_commit_hash = hashes[1]
 
-        # Server only needs the new tip; ancestor is implicitly known.
+        # Server only needs the new tip; ancestor is implicitly known
+        # (not in the "need" list, so treated as server_known).
         mock = _mock_client(needed=[new_commit_hash])
 
         with patch("vcs.remote.ops.RemoteClient", return_value=mock):
@@ -167,13 +174,15 @@ class TestPushDagWalk:
         root, _ = _make_repo_with_chain(tmp_path, num_commits=1)
         add("origin", "https://example.com", root)
 
-        with patch("vcs.remote.ops.current_branch", return_value=None):
-            with pytest.raises(RemoteError, match="detached HEAD"):
-                push("origin", repo_root=root)
+        with patch("vcs.remote.ops.RemoteClient", return_value=_mock_client()):
+            with patch("vcs.remote.ops.current_branch", return_value=None):
+                with pytest.raises(RemoteError, match="detached HEAD"):
+                    push("origin", repo_root=root)
 
     def test_missing_remote_raises(self, tmp_path: Path):
         """Pushing to an unregistered remote must raise RemoteError."""
         root, _ = _make_repo_with_chain(tmp_path, num_commits=1)
+        # No patch needed -- push() raises before constructing RemoteClient.
         with pytest.raises(RemoteError):
             push("nonexistent", repo_root=root)
 
