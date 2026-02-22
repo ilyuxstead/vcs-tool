@@ -53,17 +53,142 @@ def list_all(repo_root: Path | None = None) -> list[dict]:
     finally:
         conn.close()
 
+# ---------------------------------------------------------------------------
+# NEW HELPER — insert above push() in src/vcs/remote/ops.py
+# ---------------------------------------------------------------------------
+
+def _collect_push_objects(
+    conn,
+    store: "ObjectStore",
+    tip_hash: str,
+    server_needs: set[str],
+    server_known: set[str],
+) -> tuple[list[tuple[str, bytes]], list[tuple[str, bytes]], list[tuple[str, bytes]]]:
+    """
+    Walk the commit DAG from *tip_hash* and collect every object that must be
+    sent to the server.
+
+    The walk stops at any commit whose hash is in *server_known* — the server
+    already has that commit and all of its ancestors (commits are append-only).
+
+    Parameters
+    ----------
+    conn:
+        Open SQLite connection to the local repo.
+    store:
+        Local ObjectStore instance.
+    tip_hash:
+        SHA3-256 hex hash of the local branch tip.
+    server_needs:
+        Set of object hashes the server reported it does not have (from
+        negotiate_refs).  Used to decide which file blobs to include.
+    server_known:
+        Set of commit hashes the server already has.  BFS stops here.
+
+    Returns
+    -------
+    (commit_payloads, tree_payloads, blob_payloads)
+        Each element is a list of (hex_hash, raw_bytes) pairs in the order
+        they should be uploaded (parents before children for commits/trees).
+    """
+    from collections import deque
+    from vcs.store.db import get_commit, get_tree
+    from vcs.store.exceptions import CommitNotFoundError
+
+    visited_commits: set[str] = set()
+    # BFS queue; we collect in BFS order then reverse for topo upload order.
+    queue: deque[str] = deque([tip_hash])
+
+    ordered_commits: list[tuple[str, bytes]] = []
+    ordered_trees: list[tuple[str, bytes]] = []
+    needed_blobs: list[tuple[str, bytes]] = []
+
+    visited_trees: set[str] = set()
+
+    while queue:
+        current_hash = queue.popleft()
+        if current_hash in visited_commits:
+            continue
+        if current_hash in server_known:
+            # Server has this commit and all its ancestors — stop traversal.
+            continue
+        visited_commits.add(current_hash)
+
+        try:
+            commit = get_commit(conn, current_hash)
+        except CommitNotFoundError:
+            # Dangling reference in local DB — skip gracefully.
+            continue
+
+        # Serialise commit to the same wire format used by upload_commit().
+        commit_raw = commit.to_dict()
+        import json as _json
+        commit_bytes = _json.dumps(commit_raw).encode("utf-8")
+        ordered_commits.append((current_hash, commit_bytes))
+
+        # Collect tree (once per unique tree hash).
+        if commit.tree_hash not in visited_trees:
+            visited_trees.add(commit.tree_hash)
+            try:
+                tree = get_tree(conn, commit.tree_hash)
+            except Exception:
+                tree = None
+
+            if tree is not None:
+                tree_payload = {
+                    "type": "tree",
+                    "hash": tree.hash,
+                    "entries": [
+                        {"mode": e.mode, "name": e.name, "object_hash": e.object_hash}
+                        for e in tree.entries
+                    ],
+                }
+                tree_bytes = _json.dumps(tree_payload).encode("utf-8")
+                ordered_trees.append((tree.hash, tree_bytes))
+
+                # Collect file blobs the server says it needs.
+                for entry in tree.entries:
+                    if entry.object_hash in server_needs and store.exists(entry.object_hash):
+                        blob_data = store.read(entry.object_hash)
+                        needed_blobs.append((entry.object_hash, blob_data))
+
+        # Enqueue parents.
+        for parent_hash in commit.parent_hashes:
+            if parent_hash not in visited_commits:
+                queue.append(parent_hash)
+
+    # Reverse so parents are uploaded before children.
+    ordered_commits.reverse()
+    ordered_trees.reverse()
+
+    return ordered_commits, ordered_trees, needed_blobs
 
 def push(
     remote_name: str = "origin",
     branch_name: str | None = None,
-    repo_root: Path | None = None,
+    repo_root: "Path | None" = None,
 ) -> dict:
     """
     Push local commits to the remote via the six-step HTTP handshake.
 
-    Returns a summary dict with counts of objects uploaded.
+    Uploads the full set of ancestor commits, trees, and file blobs that
+    the server does not already have, then advances the remote branch tip.
+
+    Returns a summary dict:
+        branch          – branch name pushed
+        remote          – remote name
+        tip_hash        – SHA3-256 hash of the tip commit
+        commits_uploaded – number of commit objects sent
+        trees_uploaded   – number of tree objects sent
+        blobs_uploaded   – number of file blob objects sent
     """
+    from pathlib import Path
+    from vcs.repo.init import current_branch, find_repo_root, vcs_dir
+    from vcs.store.db import get_branch, get_remote, open_db
+    from vcs.store.exceptions import BranchNotFoundError, RemoteError
+    from vcs.store.objects import ObjectStore
+    from vcs.remote.protocol import RemoteClient
+
     root = repo_root or find_repo_root()
     dot_vcs = vcs_dir(root)
     conn = open_db(dot_vcs / "vcs.db")
@@ -84,29 +209,75 @@ def push(
 
         local_refs = {target_branch: branch.tip_hash}
 
-        # Step 1 — negotiate
-        needed_hashes = client.negotiate_refs(local_refs)
+        # ------------------------------------------------------------------
+        # Step 1 — Ref negotiation.
+        # negotiate_refs() returns the set of object hashes the server does
+        # NOT have.  We treat anything we sent in local_refs whose hash is
+        # NOT in "need" as implicitly known to the server.
+        # ------------------------------------------------------------------
+        needed_hashes: list[str] = client.negotiate_refs(local_refs)
+        server_needs: set[str] = set(needed_hashes)
 
-        # Step 3 — upload blobs
-        blobs_uploaded = 0
-        for hex_hash in needed_hashes:
-            if store.exists(hex_hash):
-                data = store.read(hex_hash)
+        # Derive "server_known" from what we advertised vs what server needs.
+        # Any commit hash we sent that the server did NOT put in "need" is
+        # already known to the server.  This seeds the BFS boundary.
+        server_known: set[str] = {
+            h for h in local_refs.values() if h not in server_needs
+        }
+
+        # ------------------------------------------------------------------
+        # Collect the full set of objects to upload via DAG walk.
+        # ------------------------------------------------------------------
+        commit_payloads, tree_payloads, blob_payloads = _collect_push_objects(
+            conn, store, branch.tip_hash, server_needs, server_known
+        )
+
+        # ------------------------------------------------------------------
+        # Step 3 — Upload file blobs (octet-stream).
+        # ------------------------------------------------------------------
+        uploaded_blob_hashes: set[str] = set()
+        for hex_hash, data in blob_payloads:
+            if hex_hash not in uploaded_blob_hashes:
                 client.upload_blob(hex_hash, data)
-                blobs_uploaded += 1
+                uploaded_blob_hashes.add(hex_hash)
 
-        # Step 4 — upload commit metadata
-        commit = get_commit(conn, branch.tip_hash)
-        client.upload_commit(commit.to_dict())
+        # ------------------------------------------------------------------
+        # Step 4a — Upload tree objects (JSON, parents-first order).
+        # ------------------------------------------------------------------
+        uploaded_tree_hashes: set[str] = set()
+        for hex_hash, data in tree_payloads:
+            if hex_hash not in uploaded_tree_hashes:
+                client.upload_blob(hex_hash, data)   # trees travel as blobs
+                uploaded_tree_hashes.add(hex_hash)
 
-        # Step 5 — update ref
+        # ------------------------------------------------------------------
+        # Step 4b — Upload commit objects (JSON, parents-first order).
+        # ------------------------------------------------------------------
+        uploaded_commit_hashes: set[str] = set()
+        for hex_hash, data in commit_payloads:
+            if hex_hash not in uploaded_commit_hashes:
+                # Use upload_commit for the tip; upload_blob for ancestors so
+                # the server can ingest them without a separate endpoint.
+                # The tip commit is always last (reversed BFS order).
+                if hex_hash == branch.tip_hash:
+                    import json as _json
+                    client.upload_commit(_json.loads(data.decode("utf-8")))
+                else:
+                    client.upload_blob(hex_hash, data)
+                uploaded_commit_hashes.add(hex_hash)
+
+        # ------------------------------------------------------------------
+        # Step 5 — Advance the remote ref.
+        # ------------------------------------------------------------------
         client.update_ref(target_branch, branch.tip_hash)
 
         return {
             "branch": target_branch,
             "remote": remote_name,
             "tip_hash": branch.tip_hash,
-            "blobs_uploaded": blobs_uploaded,
+            "commits_uploaded": len(uploaded_commit_hashes),
+            "trees_uploaded": len(uploaded_tree_hashes),
+            "blobs_uploaded": len(uploaded_blob_hashes),
         }
 
     finally:
