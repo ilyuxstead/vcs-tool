@@ -1,0 +1,4 @@
+# file: /Users/Gregory/6 Media & Creative/20-29 Creative Projects/25 Work in progress/25.01 vcs/vcs-tool/src/vcs/repo/clone.py
+# hypothesis_version: 6.151.9
+
+['.vcs', '/', '100644', 'author', 'cloned_repo', 'commit', 'entries', 'hash', 'message', 'mode', 'name', 'object_hash', 'objects', 'origin', 'parent_hashes', 'timestamp', 'tree', 'tree_hash', 'type', 'utf-8', 'vcs.db']

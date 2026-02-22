@@ -1,0 +1,4 @@
+# file: /Users/Gregory/6 Media & Creative/20-29 Creative Projects/25 Work in progress/25.01 vcs/vcs-tool/src/vcs/remote/ops.py
+# hypothesis_version: 6.151.9
+
+['ObjectStore', 'Path | None', 'author', 'blobs_downloaded', 'blobs_fetched', 'blobs_uploaded', 'branch', 'commit', 'commits_fetched', 'commits_uploaded', 'entries', 'hash', 'merge_commit', 'merged', 'message', 'mode', 'name', 'object_hash', 'objects', 'origin', 'parent_hashes', 'refs', 'remote', 'timestamp', 'tip_hash', 'tree', 'tree_hash', 'trees_uploaded', 'type', 'url', 'utf-8', 'vcs.db']

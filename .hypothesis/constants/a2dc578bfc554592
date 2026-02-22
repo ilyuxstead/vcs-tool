@@ -1,0 +1,4 @@
+# file: /Users/Gregory/6 Media & Creative/20-29 Creative Projects/25 Work in progress/25.01 vcs/vcs-tool/src/vcs/store/exceptions.py
+# hypothesis_version: 6.151.9
+
+['AUTH_ERROR', 'BRANCH_EXISTS', 'BRANCH_NOT_FOUND', 'CLONE_ERROR', 'COMMIT_NOT_FOUND', 'CONFIG_ERROR', 'MERGE_CONFLICT', 'OBJECT_CORRUPTION', 'OBJECT_NOT_FOUND', 'REMOTE_ERROR', 'REPO_EXISTS', 'REPO_NOT_FOUND', 'STAGING_ERROR', 'TAG_EXISTS', 'TAG_NOT_FOUND', 'VCS_ERROR']
