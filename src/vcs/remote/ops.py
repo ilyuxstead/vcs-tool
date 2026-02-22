@@ -28,10 +28,11 @@ from vcs.store.db import (
     open_db,
     update_branch_tip,
 )
-from vcs.store.exceptions import BranchNotFoundError, RemoteError
+from vcs.store.exceptions import BranchNotFoundError, RemoteError, MergeConflictError, VCSError
 from vcs.store.models import Commit, Tree, TreeEntry
 from vcs.store.objects import ObjectStore
 from vcs.remote.protocol import RemoteClient
+from vcs.branch.ops import merge_branch
 
 
 def add(name: str, url: str, repo_root: Path | None = None) -> None:
@@ -357,21 +358,31 @@ def fetch(
 
 
 # =============================================================================
-# PATCH: src/vcs/remote/ops.py  — replace the pull() function body only.
+# PATCH: src/vcs/remote/ops.py  — two changes required:
 #
-# The surrounding module (imports, add, list_all, push, fetch, _walk_and_ingest,
-# _parse_commit_blob, _parse_tree_blob) is UNCHANGED.  Only the pull() function
-# is modified.
+# 1. ADD these two lines to the module-level import block at the top of
+#    ops.py (alongside the existing imports from vcs.store.exceptions etc.):
+#
+#       from vcs.branch.ops import merge_branch
+#       from vcs.store.exceptions import MergeConflictError, VCSError
+#
+#    They MUST be at module level — NOT inside the function body — so that
+#    unittest.mock.patch("vcs.remote.ops.merge_branch") can find the name
+#    on the module's namespace.  A local `from … import` inside the function
+#    creates a local binding that is invisible to patch().
+#
+# 2. REPLACE the entire pull() function with the implementation below.
 # =============================================================================
 
-# ---------------------------------------------------------------------------
-# ADD to the top-level imports (if not already present):
+# Module-level imports to add (merge into the existing import block):
 #
-#   from vcs.branch.ops import merge_branch
-#   from vcs.store.exceptions import MergeConflictError
-#
-# Both symbols already live in the vcs package; this is a new import only.
-# ---------------------------------------------------------------------------
+#   from vcs.branch.ops import merge_branch          # ← NEW
+#   from vcs.store.exceptions import (
+#       BranchNotFoundError,
+#       MergeConflictError,                          # ← NEW
+#       RemoteError,
+#       VCSError,                                    # ← NEW
+#   )
 
 
 def pull(
@@ -421,9 +432,6 @@ def pull(
     * ``merged`` – *True* when a merge commit was created, *False* otherwise.
     * ``merge_commit`` – hash of the new merge commit (only present when
       ``merged=True``).
-    * ``conflicts`` – list of conflicting file paths (only present when a
-      ``MergeConflictError`` is raised; the exception is re-raised after the
-      key is attached so callers that catch it have structured data).
 
     Raises
     ------
@@ -436,8 +444,9 @@ def pull(
     VCSError
         When in detached HEAD state and no *branch_name* is provided.
     """
-    from vcs.branch.ops import merge_branch
-    from vcs.store.exceptions import MergeConflictError, VCSError
+    # NOTE: merge_branch, MergeConflictError, and VCSError are imported at
+    # MODULE LEVEL (top of ops.py), not here.  Do not move them back inside
+    # this function or patch("vcs.remote.ops.merge_branch") will break.
 
     root = repo_root or find_repo_root()
 
