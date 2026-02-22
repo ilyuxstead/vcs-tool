@@ -28,11 +28,10 @@ from vcs.store.db import (
     open_db,
     update_branch_tip,
 )
-from vcs.store.exceptions import BranchNotFoundError, RemoteError, MergeConflictError, VCSError
+from vcs.store.exceptions import BranchNotFoundError, RemoteError
 from vcs.store.models import Commit, Tree, TreeEntry
 from vcs.store.objects import ObjectStore
 from vcs.remote.protocol import RemoteClient
-from vcs.branch.ops import merge_branch
 
 
 def add(name: str, url: str, repo_root: Path | None = None) -> None:
@@ -358,31 +357,23 @@ def fetch(
 
 
 # =============================================================================
-# PATCH: src/vcs/remote/ops.py  — two changes required:
+# PATCH: src/vcs/remote/ops.py — replace the pull() function only.
 #
-# 1. ADD these two lines to the module-level import block at the top of
-#    ops.py (alongside the existing imports from vcs.store.exceptions etc.):
+# NO new module-level imports are needed.  The circular import chain:
 #
-#       from vcs.branch.ops import merge_branch
-#       from vcs.store.exceptions import MergeConflictError, VCSError
+#   vcs.branch.ops → vcs.repo.__init__ → vcs.repo.clone
+#   → vcs.remote.protocol → vcs.remote.__init__ → vcs.remote.ops
+#   → vcs.branch.ops   ← CYCLE
 #
-#    They MUST be at module level — NOT inside the function body — so that
-#    unittest.mock.patch("vcs.remote.ops.merge_branch") can find the name
-#    on the module's namespace.  A local `from … import` inside the function
-#    creates a local binding that is invisible to patch().
+# …means merge_branch CANNOT be imported at module level in ops.py.
+# The solution is "import vcs.branch.ops as _branch_ops" INSIDE pull(),
+# at the point of call.  By then both modules are fully initialised so
+# there is no cycle at runtime.
 #
-# 2. REPLACE the entire pull() function with the implementation below.
+# The test suite patches at "vcs.branch.ops.merge_branch" — the canonical
+# location where the function lives — which works regardless of where the
+# import is done.
 # =============================================================================
-
-# Module-level imports to add (merge into the existing import block):
-#
-#   from vcs.branch.ops import merge_branch          # ← NEW
-#   from vcs.store.exceptions import (
-#       BranchNotFoundError,
-#       MergeConflictError,                          # ← NEW
-#       RemoteError,
-#       VCSError,                                    # ← NEW
-#   )
 
 
 def pull(
@@ -404,8 +395,9 @@ def pull(
        name (e.g. ``main``).
     2. Resolve the merge target: use *branch_name* if given, otherwise the
        currently checked-out branch.
-    3. Call ``merge_branch()`` which performs a three-way merge using the
-       existing LCA / merge machinery in ``vcs.branch.ops``.
+    3. Call ``_branch_ops.merge_branch()`` via a deferred module import that
+       avoids the circular dependency between vcs.remote.ops and
+       vcs.branch.ops.
     4. Return a summary dict that extends the fetch result with merge metadata.
 
     Parameters
@@ -444,9 +436,19 @@ def pull(
     VCSError
         When in detached HEAD state and no *branch_name* is provided.
     """
-    # NOTE: merge_branch, MergeConflictError, and VCSError are imported at
-    # MODULE LEVEL (top of ops.py), not here.  Do not move them back inside
-    # this function or patch("vcs.remote.ops.merge_branch") will break.
+    # Deferred imports — kept inside the function body to break the circular
+    # dependency that exists at module level:
+    #
+    #   vcs.branch.ops → vcs.repo.__init__ → vcs.repo.clone
+    #   → vcs.remote.protocol → vcs.remote.__init__ → vcs.remote.ops
+    #   → vcs.branch.ops  ← CYCLE
+    #
+    # Importing the *module* object (not the function) means tests can patch
+    # at the canonical location "vcs.branch.ops.merge_branch" and the call
+    # below will pick up the patched version because it goes through the
+    # module object each time.
+    import vcs.branch.ops as _branch_ops
+    from vcs.store.exceptions import MergeConflictError, VCSError
 
     root = repo_root or find_repo_root()
 
@@ -475,18 +477,23 @@ def pull(
 
     # The branch to merge FROM is the remote-tracking branch pointer that
     # fetch() has already advanced (same name as the remote branch for now;
-    # a remotes/<remote>/<branch> namespace can be introduced later without
+    # a remotes/<remote>/<branch> namespace can be added later without
     # breaking this interface — see fetch() docstring).
-    source_branch = target_branch if target_branch in remote_refs else next(iter(remote_refs))
+    source_branch = (
+        target_branch if target_branch in remote_refs else next(iter(remote_refs))
+    )
 
     # ------------------------------------------------------------------ #
     # Step 3: three-way merge                                              #
     # ------------------------------------------------------------------ #
     try:
-        merge_commit_hash = merge_branch(
+        merge_commit_hash = _branch_ops.merge_branch(
             source_name=source_branch,
             author=author,
-            message=f"Merge remote '{remote_name}/{source_branch}' into '{target_branch}'",
+            message=(
+                f"Merge remote '{remote_name}/{source_branch}'"
+                f" into '{target_branch}'"
+            ),
             repo_root=root,
         )
     except MergeConflictError as exc:
