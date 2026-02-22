@@ -204,10 +204,16 @@ class TestPullBranchNameKwarg:
 # ---------------------------------------------------------------------------
 
 class TestPullDetachedHead:
+    @staticmethod
+    def _detach(root: Path) -> None:
+        """Write a bare commit hash to HEAD, putting the repo in detached state."""
+        commit_hash = resolve_head_commit(root)
+        assert commit_hash is not None, "repo must have at least one commit before detaching"
+        write_head(root, commit_hash)
+
     def test_detached_head_raises(self, tmp_path: Path):
         root = _make_repo(tmp_path)
-        commit_hash = resolve_head_commit(root)
-        write_head(root, commit_hash)  # detach
+        self._detach(root)
         with patch("vcs.remote.ops.RemoteClient",
                    return_value=_mock_client({"main": "f" * 64})):
             with pytest.raises(VCSError, match="detached HEAD"):
@@ -215,8 +221,7 @@ class TestPullDetachedHead:
 
     def test_explicit_branch_name_bypasses_detached_check(self, tmp_path: Path):
         root = _make_repo(tmp_path)
-        commit_hash = resolve_head_commit(root)
-        write_head(root, commit_hash)  # detach
+        self._detach(root)  # detach
         with patch("vcs.remote.ops.RemoteClient",
                    return_value=_mock_client({"feature": "g" * 64})):
             with patch("vcs.remote.ops.merge_branch", return_value="h" * 64):
@@ -298,7 +303,7 @@ class TestPullEndToEnd:
         remote_file = root / "remote_only.txt"
         remote_file.write_text("from remote")
         stage_files([remote_file], root)
-        remote_tip = create_snapshot("Remote commit", AUTHOR, root)
+        remote_tip = create_snapshot("Remote commit", AUTHOR, root).hash
 
         # Switch back to main so pull merges 'remote-main' into 'main'.
         switch_branch("main", root)
