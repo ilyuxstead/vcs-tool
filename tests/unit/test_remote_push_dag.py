@@ -47,6 +47,7 @@ def _sha(data: bytes) -> str:
 
 
 def _make_file_blob(content: bytes) -> tuple[str, bytes]:
+    """Write blob to store-independent bytes; caller writes to store via store.write(data)."""
     h = _sha(content)
     return h, content
 
@@ -87,13 +88,14 @@ def _make_repo_with_chain(tmp_path: Path, num_commits: int = 1) -> tuple[Path, l
     conn = open_db(dot_vcs / "vcs.db")
     store = ObjectStore(dot_vcs / "objects")
 
+    # store.write(data) computes and returns the hash; pass only raw bytes.
     file_hash, file_data = _make_file_blob(b"hello world")
-    store.write(file_hash, file_data)
+    assert store.write(file_data, warn_large=False) == file_hash
 
     tree_hash, tree_raw = _make_tree([
         {"mode": "100644", "name": "hello.txt", "object_hash": file_hash}
     ])
-    store.write(tree_hash, tree_raw)
+    assert store.write(tree_raw, warn_large=False) == tree_hash
     insert_tree(conn, Tree(
         hash=tree_hash,
         entries=(TreeEntry(mode="100644", name="hello.txt", object_hash=file_hash),),
