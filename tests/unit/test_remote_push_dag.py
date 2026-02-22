@@ -4,9 +4,9 @@ tests/unit/test_remote_push_dag.py
 Unit tests for the corrected remote.push() DAG walk.
 
 Covers:
-  * Single commit (root) — still works (regression guard).
-  * Two-commit linear chain — ancestor is uploaded, not just tip.
-  * Server already has the root — only the new commit is uploaded.
+  * Single commit (root) -- still works (regression guard).
+  * Two-commit linear chain -- ancestor is uploaded, not just tip.
+  * Server already has the root -- only the new commit is uploaded.
   * Detached HEAD raises RemoteError.
   * Missing remote raises RemoteError.
   * Blobs already known to server are not re-uploaded.
@@ -16,6 +16,7 @@ Covers:
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -40,7 +41,7 @@ def _make_repo_with_chain(tmp_path: Path, num_commits: int = 1) -> tuple[Path, l
 
     Uses init_repo -> stage_files -> create_snapshot so that the branch
     pointer, tree rows, and object-store blobs are all produced through
-    the same code paths as production.  Mirrors the pattern in
+    the same code paths as production.  Mirrors the pattern used in
     tests/unit/test_remote.py::_make_repo_with_commit.
 
     Returns (repo_root, [oldest_commit_hash, ..., tip_commit_hash]).
@@ -74,6 +75,18 @@ def _mock_client(needed: list[str] | None = None) -> MagicMock:
 # ---------------------------------------------------------------------------
 
 class TestPushDagWalk:
+    """
+    All tests in this class patch VCS_AUTH_TOKEN so that RemoteClient
+    construction does not raise AuthenticationError before our mocked
+    network calls are reached.  The token value is arbitrary -- the
+    RemoteClient is always replaced by a MagicMock before any real HTTP
+    request would be attempted.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _set_auth_token(self):
+        with patch.dict(os.environ, {"VCS_AUTH_TOKEN": "test-token"}):
+            yield
 
     def test_single_root_commit_uploads_commit_and_tree(self, tmp_path: Path):
         """A single-commit repo: at least one commit and one tree must be uploaded."""
@@ -81,7 +94,6 @@ class TestPushDagWalk:
         add("origin", "https://example.com", root)
         tip = hashes[0]
 
-        # Tell the mock that the server needs every object in the store.
         store = ObjectStore(vcs_dir(root) / "objects")
         mock = _mock_client(needed=store.all_hashes())
 
@@ -99,7 +111,6 @@ class TestPushDagWalk:
         add("origin", "https://example.com", root)
 
         store = ObjectStore(vcs_dir(root) / "objects")
-        # Server is empty -- needs every object.
         mock = _mock_client(needed=store.all_hashes())
 
         with patch("vcs.remote.ops.RemoteClient", return_value=mock):
@@ -121,8 +132,7 @@ class TestPushDagWalk:
         old_commit_hash = hashes[0]
         new_commit_hash = hashes[1]
 
-        # Server only reports the new tip commit as needed; the ancestor is
-        # implicitly known (not in the "need" list).
+        # Server only needs the new tip; ancestor is implicitly known.
         mock = _mock_client(needed=[new_commit_hash])
 
         with patch("vcs.remote.ops.RemoteClient", return_value=mock):
@@ -131,7 +141,6 @@ class TestPushDagWalk:
         assert result["commits_uploaded"] == 1, (
             f"Expected 1 commit uploaded, got {result['commits_uploaded']}"
         )
-        # upload_blob must NOT have been called with the old commit hash.
         upload_blob_hashes = {c.args[0] for c in mock.upload_blob.call_args_list}
         assert old_commit_hash not in upload_blob_hashes, (
             "Old (already-known) commit was re-uploaded to the server."
