@@ -30,9 +30,12 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 from vcs.repo.init import DEFAULT_BRANCH, init_repo, vcs_dir, write_head
+from vcs.repo.status import write_index
 from vcs.store.db import (
     add_remote,
     create_branch,
+    get_commit,
+    get_tree,
     insert_commit,
     insert_tree,
     open_db,
@@ -170,50 +173,20 @@ def clone_repo(
         for branch_name, tip_hash in remote_refs.items():
             create_branch(conn, branch_name, tip_hash)
 
+        # Point HEAD at the default branch BEFORE checkout so
+        # resolve_head_commit() can find it if needed by status later.
+        write_head(dest, f"ref: refs/branches/{default_branch}")
+
         # ------------------------------------------------------------------ #
         # 7. Reconstruct working tree for HEAD branch                          #
         # ------------------------------------------------------------------ #
         head_tip = remote_refs[default_branch]
         _reconstruct_working_tree(dest, store, conn, head_tip)
 
-        # Point HEAD at the default branch
-        write_head(dest, f"ref: refs/branches/{default_branch}")
-
     except CloneError:
         raise
     except Exception as exc:
         raise CloneError(f"Clone failed with unexpected error: {exc}") from exc
-    finally:
-        conn.close()
-    
-    # -----------------------------------------------------------------------
-    # Checkout working tree from HEAD commit
-    # -----------------------------------------------------------------------
-    from vcs.store.db import get_commit, get_tree, open_db
-    from vcs.store.objects import ObjectStore
-    from vcs.repo.status import write_index
-
-    dot_vcs_dest = dest / ".vcs"
-    conn = open_db(dot_vcs_dest / "vcs.db")
-    store = ObjectStore(dot_vcs_dest / "objects")
-
-    try:
-        head_hash = resolve_head_commit(dest)
-        
-        if head_hash is not None:
-            commit = get_commit(conn, head_hash)
-            tree = get_tree(conn, commit.tree_hash)
-        
-        new_index: dict[str, str] = {}
-        
-        for entry in tree.entries:
-            out_path = dest / entry.name
-            out_path.parent.mkdir(parents=True, exist_ok=True)
-            out_path.write_bytes(store.read(entry.object_hash))
-            new_index[entry.name] = entry.object_hash
-
-        write_index(dest, new_index)
-    
     finally:
         conn.close()
 
@@ -344,14 +317,12 @@ def _reconstruct_working_tree(
     tip_hash: str,
 ) -> None:
     """
-    Write all files from the HEAD commit's tree into the working directory.
+    Write all files from the HEAD commit's tree into the working directory
+    and sync the staging index so ``repo.status`` reports clean immediately.
 
-    Skips files whose blobs are absent from the local object store
-    (shouldn't happen after a successful fetch, but is defensive).
+    Skips blobs absent from the local store (defensive; shouldn't happen
+    after a successful fetch).
     """
-    from vcs.store.db import get_commit, get_tree
-    from vcs.repo.status import write_index
-
     commit = get_commit(conn, tip_hash)
     tree = get_tree(conn, commit.tree_hash)
 
@@ -362,11 +333,9 @@ def _reconstruct_working_tree(
         dest_path.parent.mkdir(parents=True, exist_ok=True)
 
         if not store.exists(entry.object_hash):
-            # Should never happen after a clean download; skip gracefully.
-            continue
+            continue  # defensive skip; log-worthy in production
 
         dest_path.write_bytes(store.read(entry.object_hash))
         index[entry.name] = entry.object_hash
 
-    # Sync the staging index so `repo.status` sees a clean state immediately.
     write_index(repo_root, index)
