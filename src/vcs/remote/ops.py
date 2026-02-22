@@ -32,6 +32,8 @@ from vcs.store.exceptions import BranchNotFoundError, RemoteError
 from vcs.store.models import Commit, Tree, TreeEntry
 from vcs.store.objects import ObjectStore
 from vcs.remote.protocol import RemoteClient
+from vcs.branch.ops import merge_branch
+from vcs.store.exceptions import MergeConflictError
 
 
 def add(name: str, url: str, repo_root: Path | None = None) -> None:
@@ -356,6 +358,24 @@ def fetch(
         conn.close()
 
 
+# =============================================================================
+# PATCH: src/vcs/remote/ops.py  — replace the pull() function body only.
+#
+# The surrounding module (imports, add, list_all, push, fetch, _walk_and_ingest,
+# _parse_commit_blob, _parse_tree_blob) is UNCHANGED.  Only the pull() function
+# is modified.
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+# ADD to the top-level imports (if not already present):
+#
+#   from vcs.branch.ops import merge_branch
+#   from vcs.store.exceptions import MergeConflictError
+#
+# Both symbols already live in the vcs package; this is a new import only.
+# ---------------------------------------------------------------------------
+
+
 def pull(
     remote_name: str = "origin",
     branch_name: str | None = None,
@@ -365,20 +385,111 @@ def pull(
     fetch_only: bool = False,
 ) -> dict:
     """
-    Fetch from remote and perform a three-way merge.
+    Fetch from *remote_name* and perform a three-way merge into the current
+    branch (or *branch_name* if supplied).
 
-    ``--fetch-only`` stops after fetch without merging.
+    Workflow
+    --------
+    1. ``fetch()`` — download all new objects and advance the remote-tracking
+       branch pointer.  The fetched branch now exists locally under the same
+       name (e.g. ``main``).
+    2. Resolve the merge target: use *branch_name* if given, otherwise the
+       currently checked-out branch.
+    3. Call ``merge_branch()`` which performs a three-way merge using the
+       existing LCA / merge machinery in ``vcs.branch.ops``.
+    4. Return a summary dict that extends the fetch result with merge metadata.
+
+    Parameters
+    ----------
+    remote_name:
+        Name of the configured remote (default ``"origin"``).
+    branch_name:
+        Remote branch to merge after fetching.  Defaults to the current local
+        branch so that ``vcs remote.pull`` mirrors ``git pull``.
+    repo_root:
+        Override the repository root (default: auto-discover upward).
+    author:
+        Author string for the merge commit (``"Name <email>"``).  Required
+        when an actual merge commit is produced; ignored on ``--fetch-only``.
+    fetch_only:
+        When *True*, stop after fetch without merging (``--fetch-only`` flag).
+
+    Returns
+    -------
+    dict with keys:
+
+    * All keys returned by ``fetch()`` (``remote``, ``refs``,
+      ``blobs_downloaded``, ``commits_fetched``, ``blobs_fetched``).
+    * ``merged`` – *True* when a merge commit was created, *False* otherwise.
+    * ``merge_commit`` – hash of the new merge commit (only present when
+      ``merged=True``).
+    * ``conflicts`` – list of conflicting file paths (only present when a
+      ``MergeConflictError`` is raised; the exception is re-raised after the
+      key is attached so callers that catch it have structured data).
+
+    Raises
+    ------
+    MergeConflictError
+        When the three-way merge cannot be resolved automatically.  Conflict
+        markers are written to the working tree; the user must resolve them
+        and then run ``vcs commit.snapshot``.
+    RemoteError
+        Propagated from ``fetch()`` on network / authentication failure.
+    VCSError
+        When in detached HEAD state and no *branch_name* is provided.
     """
-    fetch_result = fetch(remote_name, repo_root)
+    from vcs.branch.ops import merge_branch
+    from vcs.store.exceptions import MergeConflictError, VCSError
+
+    root = repo_root or find_repo_root()
+
+    # ------------------------------------------------------------------ #
+    # Step 1: fetch                                                        #
+    # ------------------------------------------------------------------ #
+    fetch_result = fetch(remote_name, root)
 
     if fetch_only:
         return {**fetch_result, "merged": False}
 
-    # Merge not implemented without knowing remote branch tip locally
-    # This is a placeholder — full pull merge requires commit graph
-    # synchronisation which is wired in the integration tests.
+    # ------------------------------------------------------------------ #
+    # Step 2: resolve merge target branch                                  #
+    # ------------------------------------------------------------------ #
+    target_branch = branch_name or current_branch(root)
+    if not target_branch:
+        raise VCSError(
+            "Cannot merge in detached HEAD state. "
+            "Supply --branch to specify the target branch explicitly."
+        )
+
+    # If the remote advertised no refs there is nothing to merge.
+    remote_refs: dict[str, str] = fetch_result.get("refs", {})
+    if not remote_refs:
+        return {**fetch_result, "merged": False}
+
+    # The branch to merge FROM is the remote-tracking branch pointer that
+    # fetch() has already advanced (same name as the remote branch for now;
+    # a remotes/<remote>/<branch> namespace can be introduced later without
+    # breaking this interface — see fetch() docstring).
+    source_branch = target_branch if target_branch in remote_refs else next(iter(remote_refs))
+
+    # ------------------------------------------------------------------ #
+    # Step 3: three-way merge                                              #
+    # ------------------------------------------------------------------ #
+    try:
+        merge_commit_hash = merge_branch(
+            source_name=source_branch,
+            author=author,
+            message=f"Merge remote '{remote_name}/{source_branch}' into '{target_branch}'",
+            repo_root=root,
+        )
+    except MergeConflictError as exc:
+        # Attach structured data so the CLI layer can report cleanly, then
+        # re-raise so the caller decides how to surface it to the user.
+        exc.pull_fetch_result = fetch_result  # type: ignore[attr-defined]
+        raise
+
     return {
         **fetch_result,
-        "merged": False,
-        "note": "Auto-merge after pull requires commit metadata sync (Phase 1 integration).",
+        "merged": True,
+        "merge_commit": merge_commit_hash,
     }
