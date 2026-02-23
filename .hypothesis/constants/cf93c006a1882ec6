@@ -1,0 +1,4 @@
+# file: /Users/Gregory/6 Media & Creative/20-29 Creative Projects/25 Work in progress/25.01 vcs/vcs-tool/src/vcs/repo/init.py
+# hypothesis_version: 6.151.9
+
+['.vcs', 'HEAD', 'bare', 'branches', 'config.toml', 'core', 'default_branch', 'main', 'objects', 'ref: refs/branches/', 'refs', 'tags', 'utf-8', 'vcs.db']
