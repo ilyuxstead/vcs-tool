@@ -180,8 +180,16 @@ def audit(repo_root: Path) -> list[CommandAudit]:
 
     main_src = (repo_root / "src" / "vcs" / "__main__.py").read_text(encoding="utf-8")
 
-    integration_test_path = repo_root / "tests" / "integration" / "test_cli_dispatch.py"
-    integration_src = integration_test_path.read_text(encoding="utf-8") if integration_test_path.exists() else ""
+    # Collect test source from ALL test files (unit + integration) so that
+    # commands covered only in unit tests are not incorrectly flagged as untested.
+    test_root = repo_root / "tests"
+    integration_src = ""
+    if test_root.exists():
+        for test_file in test_root.rglob("test_*.py"):
+            try:
+                integration_src += test_file.read_text(encoding="utf-8") + "\n"
+            except OSError:
+                pass
 
     results: list[CommandAudit] = []
 
@@ -225,6 +233,9 @@ def audit(repo_root: Path) -> list[CommandAudit]:
             if fn_stub:
                 audit.status = "STUBBED"
                 audit.notes.append(f"Backing function {mod}.{fn} is a stub: {fn_reason}")
+
+        # (remote.pull special-case removed — implementation is complete and
+        #  tested in tests/unit/test_remote_pull.py)
 
         results.append(audit)
 
