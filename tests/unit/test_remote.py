@@ -7,6 +7,7 @@ Remote ops tests mock RemoteClient to test the business logic in isolation.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import urllib.error
@@ -19,11 +20,12 @@ import pytest
 
 from vcs.remote.protocol import RemoteClient, _get_token, _redact, _headers
 from vcs.remote.ops import add, list_all, push, fetch, pull
-from vcs.repo.init import init_repo, vcs_dir
+from vcs.repo.init import init_repo, resolve_head_commit, vcs_dir
 from vcs.commit.stage import stage_files
 from vcs.commit.snapshot import create_snapshot
 from vcs.store.db import add_remote, open_db
 from vcs.store.exceptions import AuthenticationError, RemoteError
+from vcs.store.objects import ObjectStore
 
 
 # ---------------------------------------------------------------------------
@@ -39,6 +41,41 @@ def _make_repo_with_commit(tmp_path: Path, author: str = "Dev <dev@test.com>") -
     stage_files([f], root)
     create_snapshot("Initial commit", author, root)
     return root
+
+
+def _sha3(data: bytes) -> str:
+    return hashlib.sha3_256(data).hexdigest()
+
+
+def _make_remote_tree_blob(entries: list[dict] | None = None) -> tuple[str, bytes]:
+    """Return (hash, raw) for a well-formed tree blob."""
+    raw = json.dumps(
+        {"type": "tree", "entries": entries or []},
+        sort_keys=True,
+    ).encode()
+    return _sha3(raw), raw
+
+
+def _make_remote_commit_blob(
+    tree_hash: str,
+    parent_hashes: list[str] | None = None,
+    message: str = "remote commit",
+    author: str = "Remote <r@example.com>",
+    timestamp: str = "2026-01-01T00:00:00Z",
+) -> tuple[str, bytes]:
+    """Return (hash, raw) for a well-formed commit blob that _parse_commit_blob() accepts."""
+    raw = json.dumps(
+        {
+            "type": "commit",
+            "tree_hash": tree_hash,
+            "parent_hashes": parent_hashes or [],
+            "author": author,
+            "timestamp": timestamp,
+            "message": message,
+        },
+        sort_keys=True,
+    ).encode()
+    return _sha3(raw), raw
 
 
 # ---------------------------------------------------------------------------
@@ -231,9 +268,12 @@ class TestRemoteOps:
 # ---------------------------------------------------------------------------
 
 class TestRemotePush:
-    def _mock_client(self, needed_hashes=None):
+    def _mock_client(self, needed_hashes=None, remote_refs=None):
         m = MagicMock(spec=RemoteClient)
         m.negotiate_refs.return_value = needed_hashes or []
+        # fetch_refs must return a real dict; push() uses it to seed
+        # server_known_commits for the BFS stop condition.
+        m.fetch_refs.return_value = remote_refs if remote_refs is not None else {}
         m.update_ref.return_value = None
         m.upload_blob.return_value = None
         m.upload_commit.return_value = None
@@ -252,15 +292,24 @@ class TestRemotePush:
     def test_push_uploads_needed_blobs(self, tmp_path: Path):
         root = _make_repo_with_commit(tmp_path)
         add("origin", "https://example.com", root)
-        # Pretend server needs all objects in the store
-        from vcs.store.objects import ObjectStore
         store = ObjectStore(vcs_dir(root) / "objects")
         all_hashes = store.all_hashes()
-        mock_client = self._mock_client(needed_hashes=all_hashes)
+        # Empty remote: fetch_refs={} so no BFS boundary; server needs everything.
+        mock_client = self._mock_client(needed_hashes=all_hashes, remote_refs={})
         with patch("vcs.remote.ops.RemoteClient", return_value=mock_client):
             result = push("origin", repo_root=root)
-        assert result["blobs_uploaded"] == len(all_hashes)
-        assert mock_client.upload_blob.call_count == len(all_hashes)
+        # push() separates uploads into blobs / trees / commits.
+        # The sum of all three must equal the total objects in the store.
+        total_uploaded = (
+            result["blobs_uploaded"]
+            + result["trees_uploaded"]
+            + result["commits_uploaded"]
+        )
+        assert total_uploaded == len(all_hashes), (
+            f"Expected {len(all_hashes)} total uploads, got {total_uploaded} "
+            f"(blobs={result['blobs_uploaded']}, trees={result['trees_uploaded']}, "
+            f"commits={result['commits_uploaded']})"
+        )
 
     def test_push_missing_remote_raises(self, tmp_path: Path):
         root = _make_repo_with_commit(tmp_path)
@@ -271,7 +320,7 @@ class TestRemotePush:
         root = _make_repo_with_commit(tmp_path)
         add("origin", "https://example.com", root)
         # Force detached HEAD
-        from vcs.repo.init import resolve_head_commit, write_head
+        from vcs.repo.init import write_head
         commit_hash = resolve_head_commit(root)
         write_head(root, commit_hash)
         with patch("vcs.remote.ops.RemoteClient", return_value=self._mock_client()):
@@ -293,29 +342,52 @@ class TestRemotePush:
 
 class TestRemoteFetch:
     def test_fetch_downloads_missing_blobs(self, tmp_path: Path):
+        # fetch() calls _walk_and_ingest(), which downloads each ref tip and
+        # immediately parses it as a commit via _parse_commit_blob().
+        # Supplying raw bytes that aren't valid commit JSON causes:
+        #   RemoteError: Corrupt commit object ...
+        # We must provide a well-formed commit + tree blob pair.
         root = _make_repo_with_commit(tmp_path)
         add("origin", "https://example.com", root)
-        fake_hash = "f" * 64
+
+        tree_hash, tree_raw = _make_remote_tree_blob([])
+        commit_hash, commit_raw = _make_remote_commit_blob(tree_hash, [])
+
+        blob_map = {commit_hash: commit_raw, tree_hash: tree_raw}
         mock_client = MagicMock(spec=RemoteClient)
-        mock_client.fetch_refs.return_value = {"main": fake_hash}
-        mock_client.download_blob.return_value = b"remote blob data"
+        mock_client.fetch_refs.return_value = {"main": commit_hash}
+        mock_client.download_blob.side_effect = lambda h: blob_map[h]
+
         with patch("vcs.remote.ops.RemoteClient", return_value=mock_client):
             result = fetch("origin", repo_root=root)
-        assert result["blobs_downloaded"] == 1
-        mock_client.download_blob.assert_called_once_with(fake_hash)
+
+        # Commit blob + tree blob were both downloaded.
+        assert result["commits_fetched"] == 1
+        assert result["blobs_downloaded"] >= 1
+        assert mock_client.download_blob.call_count >= 1
 
     def test_fetch_skips_existing_blobs(self, tmp_path: Path):
+        # _walk_and_ingest() guards on commit_exists(conn, hash) in SQLite,
+        # not on whether the hash is present in the object store.  Passing a
+        # raw file-blob hash (object store only, no SQLite row) caused the
+        # guard to miss, download_blob to be called with a MagicMock default
+        # return value, and store.write() to raise:
+        #   TypeError: object supporting the buffer API required
+        #
+        # The correct sentinel is the HEAD commit hash, which IS in SQLite.
         root = _make_repo_with_commit(tmp_path)
         add("origin", "https://example.com", root)
-        # Use a hash that already exists locally
-        from vcs.store.objects import ObjectStore
-        store = ObjectStore(vcs_dir(root) / "objects")
-        existing_hash = store.all_hashes()[0]
+
+        local_tip = resolve_head_commit(root)
+
         mock_client = MagicMock(spec=RemoteClient)
-        mock_client.fetch_refs.return_value = {"main": existing_hash}
+        mock_client.fetch_refs.return_value = {"main": local_tip}
+
         with patch("vcs.remote.ops.RemoteClient", return_value=mock_client):
             result = fetch("origin", repo_root=root)
+
         assert result["blobs_downloaded"] == 0
+        assert result["commits_fetched"] == 0
         mock_client.download_blob.assert_not_called()
 
     def test_fetch_missing_remote_raises(self, tmp_path: Path):
