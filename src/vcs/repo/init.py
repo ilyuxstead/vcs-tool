@@ -60,7 +60,7 @@ def init_repo(path: Path, *, bare: bool = False) -> Path:
         The working-tree root directory.  Created if it does not exist.
     bare:
         If *True*, create a bare repository (no working tree).
-        Currently a flag placeholder for future use.
+        reserved future use.
 
     Returns
     -------

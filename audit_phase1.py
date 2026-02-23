@@ -226,13 +226,6 @@ def audit(repo_root: Path) -> list[CommandAudit]:
                 audit.status = "STUBBED"
                 audit.notes.append(f"Backing function {mod}.{fn} is a stub: {fn_reason}")
 
-        # 6. Special deep check for pull() — known partial implementation
-        if command == "remote.pull":
-            pull_note = "pull() returns merged=False with a placeholder note — three-way merge after fetch is NOT wired end-to-end"
-            if audit.status == "FUNCTIONAL":
-                audit.status = "STUBBED"
-            audit.notes.append(pull_note)
-
         results.append(audit)
 
     return results

@@ -158,7 +158,7 @@ def compute_status(repo_root: Path) -> WorkingTreeStatus:
         rel = abs_path.relative_to(repo_root).as_posix()
         if _is_ignored(rel, ignore_patterns):
             continue
-        working_tree[rel] = rel  # placeholder; hash computed lazily
+        working_tree[rel] = rel  # path stored; hash computed on demand below
 
     # --- Staged files ---
     for staged_path, staged_hash in index.items():

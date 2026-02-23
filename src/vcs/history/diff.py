@@ -15,6 +15,17 @@ from vcs.store.db import get_commit, get_tree, open_db
 from vcs.store.objects import ObjectStore
 
 
+def diff(
+    hash_a: str | None,
+    hash_b: str | None,
+    repo_root: Path | None = None,
+    *,
+    stat: bool = False,
+    name_only: bool = False,
+) -> list[dict]:
+    """Public alias for diff_commits; satisfies the vcs.history.diff.diff contract."""
+    return diff_commits(hash_a, hash_b, repo_root, stat=stat, name_only=name_only)
+
 def _get_tree_blobs(
     conn, store: ObjectStore, tree_hash: str
 ) -> dict[str, bytes]:
