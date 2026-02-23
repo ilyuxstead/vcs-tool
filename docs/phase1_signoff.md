@@ -1,4 +1,4 @@
-# results of audit_phase1.py
+# results of `audit_phase1.py`
 
 ```
 ========================================================================
@@ -83,3 +83,36 @@ TOTAL                          1919    108    508     47    94%
 Required test coverage of 90.0% reached. Total coverage: 93.53%
 ========================================================================================== 442 passed in 31.77s ==========================================================================================
   ```
+
+  # results of `test_remote_properties.py`
+
+  ```
+  ========================================================================================== test session starts ===========================================================================================
+platform darwin -- Python 3.13.7, pytest-9.0.2, pluggy-1.6.0 -- /Library/Frameworks/Python.framework/Versions/3.13/bin/python3.13
+cachedir: .pytest_cache
+hypothesis profile 'default'
+rootdir: /Users/Gregory/6 Media & Creative/20-29 Creative Projects/25 Work in progress/25.01 vcs/vcs-tool
+configfile: pyproject.toml
+plugins: hypothesis-6.151.9, cov-7.0.0
+collected 16 items                                                                                                                                                                                       
+
+tests/property/test_remote_properties.py::TestCloneRepoProperties::test_P_CL_01_vcs_dir_always_created PASSED                                                                                      [  6%]
+tests/property/test_remote_properties.py::TestCloneRepoProperties::test_P_CL_02_origin_url_matches_input PASSED                                                                                    [ 12%]
+tests/property/test_remote_properties.py::TestCloneRepoProperties::test_P_CL_03_local_branches_equal_remote_refs_keys PASSED                                                                       [ 18%]
+tests/property/test_remote_properties.py::TestCloneRepoProperties::test_P_CL_04_all_tip_commits_in_sqlite PASSED                                                                                   [ 25%]
+tests/property/test_remote_properties.py::TestFetchProperties::test_P_FE_01_branch_count_never_decreases PASSED                                                                                    [ 31%]
+tests/property/test_remote_properties.py::TestFetchProperties::test_P_FE_02_commits_fetched_non_negative PASSED                                                                                    [ 37%]
+tests/property/test_remote_properties.py::TestFetchProperties::test_P_FE_03_tip_commits_in_sqlite_after_fetch PASSED                                                                               [ 43%]
+tests/property/test_remote_properties.py::TestFetchProperties::test_P_FE_04_required_keys_always_present PASSED                                                                                    [ 50%]
+tests/property/test_remote_properties.py::TestPushProperties::test_P_PU_01_required_keys_always_present PASSED                                                                                     [ 56%]
+tests/property/test_remote_properties.py::TestPushProperties::test_P_PU_02_upload_counts_non_negative PASSED                                                                                       [ 62%]
+tests/property/test_remote_properties.py::TestPushProperties::test_P_PU_03_tip_hash_is_valid_hex_digest PASSED                                                                                     [ 68%]
+tests/property/test_remote_properties.py::TestPullProperties::test_P_PL_01_merged_is_always_bool PASSED                                                                                            [ 75%]
+tests/property/test_remote_properties.py::TestPullProperties::test_P_PL_02_merge_commit_present_when_merged_true PASSED                                                                            [ 81%]
+tests/property/test_remote_properties.py::TestPullProperties::test_P_PL_03_empty_refs_always_produces_merged_false PASSED                                                                          [ 87%]
+tests/property/test_remote_properties.py::TestPullProperties::test_P_PL_04_fetch_only_always_produces_merged_false PASSED                                                                          [ 93%]
+tests/property/test_remote_properties.py::TestPullProperties::test_P_PL_05_result_contains_all_fetch_keys PASSED                                                                                   [100%]
+
+========================================================================================== 16 passed in 15.34s ===========================================================================================
+```
+
